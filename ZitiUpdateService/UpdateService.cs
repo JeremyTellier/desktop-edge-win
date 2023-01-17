@@ -111,6 +111,7 @@ namespace ZitiUpdateService {
 					Error = "",
 					Message = "Configuration Changed",
 					Type = "Status",
+					ServiceLog = Path.Combine(exeLocation, "logs"),
 					Status = ServiceActions.ServiceStatus(),
 					ReleaseStream = IsBeta ? "beta" : "stable",
 					AutomaticUpgradeDisabled = CurrentSettings.AutomaticUpdatesDisabled.ToString(),
