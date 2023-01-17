@@ -551,6 +551,7 @@ namespace ZitiUpdateService {
 				Code = 0,
 				Error = "",
 				Message = "Success",
+				ServiceLog = Path.Combine(exeLocation, "logs"),
 				Type = "Status",
 				Status = ServiceActions.ServiceStatus(),
 				ReleaseStream = IsBeta ? "beta" : "stable",
