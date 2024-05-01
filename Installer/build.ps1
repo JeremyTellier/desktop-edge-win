@@ -7,32 +7,50 @@ function verifyFile($path) {
         throw [System.IO.FileNotFoundException] "$path not found"
     }
 }
-
-function downloadWintunZip() {
-    if (Test-Path -Path "${scriptPath}\wintun.zip") {
-        echo "using wintun.zip found at ${scriptPath}\wintun.zip"
-    } else {
-        echo "wintun.zip not found. attempting to download."       
-        if($null -eq $env:WINTUN_DL_URL) {
-            echo "========================== fetching wintun.zip =========================="
-            $WINTUN_DL_URL="https://www.wintun.net/builds/wintun-0.13.zip"
-            echo "Beginning to download wintun from ${WINTUN_DL_URL}"
-            echo ""
-            $ProgressPreference = 'SilentlyContinue'
-            Invoke-WebRequest $WINTUN_DL_URL -OutFile "${scriptPath}\wintun.zip"
-            verifyFile("${scriptPath}\wintun.zip")
-            echo "Expanding downloaded file..."
-        } else {
-            echo "WINTUN_DL_URL WAS SET"
-        }
-    }
+function signFile($loc, $name) {
+	echo "Using signtool: '$SIGNTOOL'"
+	$cert="${scriptPath}\GlobalSign-SigningCert-2024-2027.cert"
+	$exeAbsPath="$loc\$name"
+	echo "----- signFile: producing digest to send to AWS KMS -----"
+	& "$SIGNTOOL" sign /dg $loc /fd sha256 /f $cert $exeAbsPath
+	$tosign = Get-Content "${exeAbsPath}.dig" -Raw
+	echo "----- signFile: sending digest to AWS KMS for signing. -----"
+	$signature = aws kms sign --key-id $env:AWS_KEY_ID --message $tosign --message-type DIGEST --signing-algorithm "RSASSA_PKCS1_V1_5_SHA_256" --output text --query "Signature"
+	Set-Content -Path "${exeAbsPath}.dig.signed" -Value $signature
+	echo "----- signature len: $($signature.Length) ----"
+	dir $loc
+	echo "----- done signing digest -----"
+	
+	echo "----- signFile: adding signature -----"
+	& "$SIGNTOOL" sign /di $loc $exeAbsPath
+	echo "----- signFile: adding timestamp -----"
+	& "$SIGNTOOL" timestamp /tr "http://timestamp.digicert.com" /td sha256 $exeAbsPath
+	& "$SIGNTOOL" verify /pa $exeAbsPath
+	echo "removing any ifles leftover from signing"
+	Remove-Item "${exeAbsPath}.dig" -ErrorAction SilentlyContinue
+	Remove-Item "${exeAbsPath}.dig.signed" -ErrorAction SilentlyContinue
+	Remove-Item "${exeAbsPath}.p7u" -ErrorAction SilentlyContinue
+}
+function fetchCRedis() {	
+	echo "========================== fetching vc++ redist =========================="
+	$VC_REDIST_URL="https://aka.ms/vs/17/release/vc_redist.x64.exe"
+	echo "Beginning to download vc++ redist from MS at ${VC_REDIST_URL}"
+	echo ""
+	Invoke-WebRequest $VC_REDIST_URL -OutFile "${buildPath}\VC_redist.x64.exe"
+	verifyFile("${buildPath}\VC_redist.x64.exe")
+	echo "========================== fetching vc++ redist complete =========================="
 }
 
 echo "========================== build.ps1 begins =========================="
-nuget restore .\ZitiDesktopEdge.sln
 $invocation = (Get-Variable MyInvocation).Value
 $scriptPath = Split-Path $invocation.MyCommand.Path
+$checkoutRoot = (Resolve-Path '${scriptPath}\..')
 $buildPath = "${scriptPath}\build"
+$ADV_INST_VERSION = Get-Content -Path "${checkoutRoot}\adv-inst-version"
+$ADV_INST_HOME = "C:\Program Files (x86)\Caphyon\Advanced Installer ${ADV_INST_VERSION}"
+$SIGNTOOL="${ADV_INST_HOME}\third-party\winsdk\x64\signtool"
+$ADVINST = "${ADV_INST_HOME}\bin\x86\AdvancedInstaller.com"
+$ADVPROJECT = "${scriptPath}\ZitiDesktopEdge.aip"
 
 cd ./Installer
 echo "Getting latest UI Build"
@@ -51,23 +69,19 @@ cd ..
 echo "Cleaning previous build folder if it exists"
 Remove-Item "${buildPath}" -r -ErrorAction Ignore
 mkdir "${buildPath}" -ErrorAction Ignore > $null
-    
-downloadWintunZip
 
-Expand-Archive -Path "${scriptPath}\wintun.zip" -Force -DestinationPath "${buildPath}\service"
-echo "expanded wintun.zip file to ${buildPath}\service"
+$global:ProgressPreference = "SilentlyContinue"
 
-$zet_binary="${buildPath}"
 if($null -eq $env:ZITI_EDGE_TUNNEL_BUILD) {
-    echo "========================== fetching ziti-edge-tunnel =========================="
     if($null -eq $env:ZITI_EDGE_TUNNEL_VERSION) {
-        $zet_dl="https://github.com/openziti/ziti-tunnel-sdk-c/releases/latest/download/ziti-edge-tunnel-Windows_x86_64.zip"
+        $ZITI_EDGE_TUNNEL_VERSION="v0.22.28"
     } else {
-        $zet_dl="https://github.com/openziti/ziti-tunnel-sdk-c/releases/download/${env:ZITI_EDGE_TUNNEL_VERSION}/ziti-edge-tunnel-Windows_x86_64.zip"
+        $ZITI_EDGE_TUNNEL_VERSION=$env:ZITI_EDGE_TUNNEL_VERSION
     }
+    echo "========================== fetching ziti-edge-tunnel =========================="
+    $zet_dl="https://github.com/openziti/ziti-tunnel-sdk-c/releases/download/${ZITI_EDGE_TUNNEL_VERSION}/ziti-edge-tunnel-Windows_x86_64.zip"
     echo "Beginning to download ziti-edge-tunnel from ${zet_dl}"
     echo ""
-    $ProgressPreference = 'SilentlyContinue'
     $response = Invoke-WebRequest $zet_dl -OutFile "${scriptPath}\zet.zip"
     verifyFile("${scriptPath}\zet.zip")
 
@@ -84,32 +98,24 @@ if($null -eq $env:ZITI_EDGE_TUNNEL_BUILD) {
     echo ""
     mkdir "${buildPath}\service" -ErrorAction Ignore > $null
     copy "$zet_folder\ziti-edge-tunnel.exe" -Destination "$buildPath\service" -Force
+    copy "$zet_folder\wintun.dll" -Destination "$buildPath\service" -Force
 }
 
-Push-Location ${scriptPath}\..
+Push-Location ${checkoutRoot}
 
-echo "========================== fetching vc++ redist =========================="
-$VC_REDIST_URL="https://aka.ms/vs/17/release/vc_redist.x64.exe"
-echo "Beginning to download vc++ redist from MS at ${VC_REDIST_URL}"
-echo ""
-$ProgressPreference = 'SilentlyContinue'
-Invoke-WebRequest $VC_REDIST_URL -OutFile "${buildPath}\VC_redist.x64.exe"
-verifyFile("${buildPath}\VC_redist.x64.exe")
-echo "========================== fetching vc++ redist complete =========================="
 
 echo "Updating the version for UI and Installer"
 .\update-versions.ps1
+
+echo "Restoring the .NET project"
+nuget restore .\ZitiDesktopEdge.sln
 
 echo "Building the UI"
 msbuild ZitiDesktopEdge.sln /property:Configuration=Release
 
 Pop-Location
 
-$ADV_INST_HOME = "C:\Program Files (x86)\Caphyon\Advanced Installer 21.2.2"
-$ADVINST = "${ADV_INST_HOME}\bin\x86\AdvancedInstaller.com"
-$ADVPROJECT = "${scriptPath}\ZitiDesktopEdge.aip"
-
-$installerVersion=(Get-Content -Path ${scriptPath}\..\version)
+$installerVersion=(Get-Content -Path ${checkoutRoot}\version)
 if($null -ne $env:ZITI_DESKTOP_EDGE_VERSION) {
     echo "ZITI_DESKTOP_EDGE_VERSION is set. Using that: ${env:ZITI_DESKTOP_EDGE_VERSION} instead of version found in file ${installerVersion}"
     $installerVersion=$env:ZITI_DESKTOP_EDGE_VERSION
@@ -134,17 +140,28 @@ if($gituser -eq "ziti-ci") {
   echo "detected user [${gituser}] which is not ziti-ci - skipping installer commit"
 }
 
-$exeAbsPath="${scriptPath}\Output\Ziti Desktop Edge Client-${installerVersion}.exe"
+$outputPath="${scriptPath}\Output"
+$exeName="Ziti Desktop Edge Client-${installerVersion}.exe"
+$exeAbsPath="${outputPath}\${exeName}"
 
-if($null -eq $env:OPENZITI_P12_PASS) {
+if($null -eq $env:AWS_KEY_ID) {
     echo ""
-    echo "Not calling signtool - env:OPENZITI_P12_PASS is not set"
+	echo "AWS_KEY_ID not set. __THE BINARY WILL NOT BE SIGNED!__"
     echo ""
 } else {
-    echo "adding additional signature to executable with openziti.org signing certificate"\
-    echo "RUNNING: $ADV_INST_HOME\third-party\winsdk\x64\signtool" sign /f "${scriptPath}\openziti.p12" /p "${env:OPENZITI_P12_PASS}" /tr http://ts.ssl.com /fd sha512 /td sha512 /as "${exeAbsPath}"
-    & "$ADV_INST_HOME\third-party\winsdk\x64\signtool" sign /f "${scriptPath}\openziti.p12" /p "${env:OPENZITI_P12_PASS}" /tr http://ts.ssl.com /fd sha512 /td sha512 /as "${exeAbsPath}"
+    signFile -loc $outputPath -name $exeName
 }
+
+if($null -eq $env:OPENZITI_P12_PASS_2024) {
+    echo ""
+    echo "Not calling signtool - env:OPENZITI_P12_PASS_2024 is not set"
+    echo ""
+} else {
+    echo "adding additional signature to executable with openziti.org signing certificate"
+    echo "Using ${SIGNTOOL} to sign executable with the additional OpenZiti signature"
+    & "$SIGNTOOL" sign /f "${scriptPath}\openziti_2024.p12" /p "${env:OPENZITI_P12_PASS_2024}" /tr http://ts.ssl.com /fd sha512 /td sha512 /as "${exeAbsPath}"
+}
+
 (Get-FileHash "${exeAbsPath}").Hash > "${scriptPath}\Output\Ziti Desktop Edge Client-${installerVersion}.exe.sha256"
 echo "========================== build.ps1 completed =========================="
 
@@ -165,3 +182,5 @@ if (test-path 'ZitiUI.zip') {
     Remove-Item ZitiUI.zip -Recurse -Force -Confirm:$false
 }
 cd ..
+$updateJson = "${installerVersion}.json"
+& .\Installer\output-build-json.ps1 -version $installerVersion -url $defaultRootUrl -stream $defaultStream -published_at $defaultPublishedAt -outputPath $updateJson
